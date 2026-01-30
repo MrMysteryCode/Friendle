@@ -13,6 +13,18 @@
 // - Computes nameMap (userID → displayName) and metricsMap (per-user activity profile)
 // - Sends nameMap and metricsMap to Worker (/metadata endpoint)
 // - POSTs puzzles to Worker with HMAC-SHA256 signature header
+//
+// Discord permissions/intents required for this bot:
+// OAuth2 scopes: bot, applications.commands
+// Bot permissions:
+// - View Channels (read text channels)
+// - Read Message History (scrape past messages)
+// - Send Messages (reply to slash commands in-channel)
+// Privileged gateway intents (enable in Dev Portal):
+// - Server Members Intent (GuildMembers)
+// - Message Content Intent (MessageContent)
+// Standard gateway intents:
+// - Guilds, GuildMessages
 
 import fs from 'fs';
 import path from 'path';
@@ -730,3 +742,4 @@ if (process.argv.includes('--run-now')) {
     generateDailyPuzzles();
   });
 }
+
