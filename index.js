@@ -181,6 +181,15 @@ function buildPlayUrl(guildId) {
   }
 }
 
+function getDayRangeUtc(offsetDays = 0) {
+  const now = new Date();
+  const todayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0));
+  const start = new Date(todayStart.getTime() + offsetDays * 24 * 60 * 60 * 1000);
+  const end = new Date(start.getTime() + 24 * 60 * 60 * 1000 - 1);
+  const dateLabel = start.toISOString().slice(0, 10);
+  return { start, end, dateLabel };
+}
+
 // ------------------------------------------------------------------
 // Message scraping (same as before)
 // ------------------------------------------------------------------
@@ -213,6 +222,55 @@ async function fetchMessagesInRange(channel, startDate, endDate) {
     // ignore channels the bot can't read
   }
   return msgs;
+}
+
+async function collectMessagesForRange(channels, start, end) {
+  const allMessages = [];
+  const messagesByUser = new Map();
+
+  for (const [, channel] of channels) {
+    const msgs = await fetchMessagesInRange(channel, start, end);
+    if (!msgs || msgs.length === 0) continue;
+
+    allMessages.push(...msgs);
+    for (const m of msgs) {
+      if (!messagesByUser.has(m.author.id)) messagesByUser.set(m.author.id, []);
+      messagesByUser.get(m.author.id).push(m);
+    }
+
+    await new Promise(r => setTimeout(r, 150));
+  }
+
+  return { allMessages, messagesByUser };
+}
+
+async function collectRecentMessages(channels, perChannelLimit = 50, totalLimit = 500) {
+  const allMessages = [];
+
+  for (const [, channel] of channels) {
+    try {
+      const fetched = await channel.messages.fetch({ limit: perChannelLimit });
+      if (!fetched || fetched.size === 0) continue;
+      allMessages.push(...fetched.values());
+      await new Promise(r => setTimeout(r, 150));
+    } catch (err) {
+      // ignore channels the bot can't read
+    }
+  }
+
+  allMessages.sort((a, b) => b.createdTimestamp - a.createdTimestamp);
+  const trimmed = totalLimit ? allMessages.slice(0, totalLimit) : allMessages;
+  const messagesByUser = new Map();
+  for (const m of trimmed) {
+    if (!messagesByUser.has(m.author.id)) messagesByUser.set(m.author.id, []);
+    messagesByUser.get(m.author.id).push(m);
+  }
+
+  const dateLabel = trimmed.length
+    ? new Date(trimmed[0].createdTimestamp).toISOString().slice(0, 10)
+    : null;
+
+  return { allMessages: trimmed, messagesByUser, dateLabel };
 }
 
 // ------------------------------------------------------------------
@@ -398,15 +456,11 @@ async function buildStatlePayload(guild, allMessages, dateLabel) {
 // ------------------------------------------------------------------
 async function generateDailyPuzzles() {
   console.log('Starting daily puzzle generation...');
-  const now = new Date();
-  const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0) - 1);
-  const start = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), end.getUTCDate(), 0, 0, 0));
-  const dateLabel = start.toISOString().slice(0, 10);
 
   for (const [guildId, guild] of client.guilds.cache) {
     try {
       console.log('Processing guild', guildId);
-      await generatePuzzlesForGuild(guild, dateLabel, start, end);
+      await generatePuzzlesForGuild(guild);
     } catch (err) {
       console.error('Error processing guild', guildId, err.message);
     }
@@ -444,7 +498,7 @@ async function postPuzzleToWebsite(guildId, puzzle) {
   }
 }
 
-async function generatePuzzlesForGuild(guild, dateLabel, start, end) {
+async function generatePuzzlesForGuild(guild) {
   const guildId = guild.id;
   await guild.members.fetch();
   const membersMap = new Map(guild.members.cache.map(m => [m.user.id, m]));
@@ -459,21 +513,34 @@ async function generatePuzzlesForGuild(guild, dateLabel, start, end) {
     c => c.isTextBased() && c.viewable && !c.nsfw && c.type === 0 // 0 = GUILD_TEXT
   );
 
-  const allMessages = [];
-  const messagesByUser = new Map();
+  const yesterdayRange = getDayRangeUtc(-1);
+  const todayRange = getDayRangeUtc(0);
+  const ranges = [yesterdayRange, todayRange];
 
-  for (const [, channel] of channels) {
-    const msgs = await fetchMessagesInRange(channel, start, end);
-    if (!msgs || msgs.length === 0) continue;
+  let allMessages = [];
+  let messagesByUser = new Map();
+  let dateLabel = yesterdayRange.dateLabel;
 
-    allMessages.push(...msgs);
-
-    for (const m of msgs) {
-      if (!messagesByUser.has(m.author.id)) messagesByUser.set(m.author.id, []);
-      messagesByUser.get(m.author.id).push(m);
+  for (const range of ranges) {
+    const result = await collectMessagesForRange(channels, range.start, range.end);
+    if (result.allMessages.length > 0) {
+      allMessages = result.allMessages;
+      messagesByUser = result.messagesByUser;
+      dateLabel = range.dateLabel;
+      break;
     }
+  }
 
-    await new Promise(r => setTimeout(r, 150));
+  if (allMessages.length === 0) {
+    const fallback = await collectRecentMessages(channels);
+    allMessages = fallback.allMessages;
+    messagesByUser = fallback.messagesByUser;
+    if (fallback.dateLabel) dateLabel = fallback.dateLabel;
+  }
+
+  if (allMessages.length === 0) {
+    console.log('No recent messages available for guild', guildId);
+    return { puzzles: [], generated: false, reason: 'no_messages' };
   }
 
   // Compute nameMap and metricsMap for this guild/date
@@ -557,12 +624,10 @@ async function generatePuzzlesForGuild(guild, dateLabel, start, end) {
   return { puzzles, generated: true };
 }
 
-function getYesterdayRangeUtc() {
-  const now = new Date();
-  const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0) - 1);
-  const start = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), end.getUTCDate(), 0, 0, 0));
-  const dateLabel = start.toISOString().slice(0, 10);
-  return { start, end, dateLabel };
+function getRecentDateLabelsUtc() {
+  const yesterday = getDayRangeUtc(-1).dateLabel;
+  const today = getDayRangeUtc(0).dateLabel;
+  return { yesterday, today };
 }
 
 // ------------------------------------------------------------------
@@ -588,9 +653,9 @@ client.on('interactionCreate', async interaction => {
         });
         return;
       }
-      const { start, end, dateLabel } = getYesterdayRangeUtc();
+      const { yesterday, today } = getRecentDateLabelsUtc();
       const lastGenerated = storage.lastRunByGuild?.[interaction.guildId] || null;
-      if (lastGenerated !== dateLabel) {
+      if (lastGenerated !== yesterday && lastGenerated !== today) {
         const guild = client.guilds.cache.get(interaction.guildId);
         if (!guild) {
           await interaction.reply({
@@ -600,7 +665,7 @@ client.on('interactionCreate', async interaction => {
           return;
         }
         await interaction.deferReply();
-        const result = await generatePuzzlesForGuild(guild, dateLabel, start, end);
+        const result = await generatePuzzlesForGuild(guild);
         if (result.reason === 'no_opted_in') {
           await interaction.editReply('No one in this server has opted in yet. Use /optin to get started.');
           return;
