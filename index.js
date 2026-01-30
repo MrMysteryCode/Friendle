@@ -5,7 +5,7 @@
 // a /metadata endpoint on the Worker for frontend validation.
 //
 // Features:
-// - Slash commands: /optin, /optout, /force_generate (admin only)
+// - Slash commands: /optin, /optout, /force_generate (admin only), /play
 // - Scheduled daily job (CRON) to generate puzzles
 // - Message scraping from yesterday across guild text channels
 // - Building payloads for 4 mini-games: friendle_daily, quotele, mediale, statle
@@ -32,6 +32,7 @@ const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID || null; // optional for testing
 const WEBSITE_ENDPOINT = process.env.WEBSITE_ENDPOINT; // e.g. https://friendle-api.example.workers.dev
+const FRONTEND_URL = process.env.FRONTEND_URL || process.env.WEBSITE_URL || null; // e.g. https://friendle.example.com
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'change-me';
 const CRON_SCHEDULE = process.env.CRON_SCHEDULE || '0 1 * * *'; // default 01:00 UTC
 const MIN_QUOTE_LENGTH = Number(process.env.MIN_QUOTE_LENGTH) || 40;
@@ -40,15 +41,20 @@ if (!DISCORD_TOKEN || !WEBSITE_ENDPOINT) {
   console.error('Please set DISCORD_TOKEN and WEBSITE_ENDPOINT in your environment.');
   process.exit(1);
 }
+if (!FRONTEND_URL) {
+  console.warn('FRONTEND_URL is not set. /play will not be available.');
+}
 
 // ------------------------------------------------------------------
 // Simple storage (opt-in users & last-run timestamp)
 // ------------------------------------------------------------------
 const STORAGE_PATH = path.join(process.cwd(), 'bot_storage.json');
-let storage = { optInUsers: [], lastRun: null };
+let storage = { optInUsers: [], lastRun: null, lastRunByGuild: {} };
 if (fs.existsSync(STORAGE_PATH)) {
   try {
     storage = JSON.parse(fs.readFileSync(STORAGE_PATH, 'utf8'));
+    if (!storage.lastRunByGuild) storage.lastRunByGuild = {};
+    if (!storage.optInUsers) storage.optInUsers = [];
   } catch (e) {
     console.warn('Could not parse storage file, using defaults.');
   }
@@ -72,6 +78,24 @@ const client = new Client({
 
 // Register slash commands (only once on startup)
 const commands = [
+  {
+    name: 'play',
+    description: 'Get a Friendle play link for this server',
+    options: [
+      {
+        name: 'game',
+        description: 'Optional game to open',
+        type: 3,
+        required: false,
+        choices: [
+          { name: 'Classic (Friendle Daily)', value: 'friendle_daily' },
+          { name: 'Quotele', value: 'quotele' },
+          { name: 'Mediale', value: 'mediale' },
+          { name: 'Statle', value: 'statle' }
+        ]
+      }
+    ]
+  },
   { name: 'optin', description: 'Opt in to Friendle puzzles (allow your public activity to be used)' },
   { name: 'optout', description: 'Opt out of Friendle puzzles' },
   { name: 'force_generate', description: 'Force puzzle generation now (admin only)' }
@@ -158,6 +182,18 @@ function getDisplayName(member) {
   return member.nickname || member.user.globalName || member.user.username;
 }
 
+function buildPlayUrl(guildId, game) {
+  if (!FRONTEND_URL) return null;
+  try {
+    const url = new URL(FRONTEND_URL);
+    url.searchParams.set('guild', guildId);
+    if (game) url.searchParams.set('game', game);
+    return url.toString();
+  } catch (err) {
+    return null;
+  }
+}
+
 // ------------------------------------------------------------------
 // Message scraping (same as before)
 // ------------------------------------------------------------------
@@ -197,7 +233,7 @@ async function fetchMessagesInRange(channel, startDate, endDate) {
 // ------------------------------------------------------------------
 async function buildFriendlePayload(guild, messagesByUser, membersMap, dateLabel) {
   const candidateEntries = Array.from(messagesByUser.entries())
-    .filter(([uid, msgs]) => storage.optInUsers.includes(uid) || msgs.length > 0);
+    .filter(([uid, msgs]) => storage.optInUsers.includes(uid) && msgs.length > 0);
   if (candidateEntries.length === 0) return null;
   const [userId, msgs] = candidateEntries[Math.floor(Math.random() * candidateEntries.length)];
   const member = membersMap.get(userId);
@@ -383,105 +419,7 @@ async function generateDailyPuzzles() {
   for (const [guildId, guild] of client.guilds.cache) {
     try {
       console.log('Processing guild', guildId);
-      await guild.members.fetch();
-      const membersMap = new Map(guild.members.cache.map(m => [m.user.id, m]));
-
-      const channels = guild.channels.cache.filter(
-        c => c.isTextBased() && c.viewable && !c.nsfw && c.type === 0 // 0 = GUILD_TEXT
-      );
-
-      const allMessages = [];
-      const messagesByUser = new Map();
-
-      for (const [, channel] of channels) {
-        const msgs = await fetchMessagesInRange(channel, start, end);
-        if (!msgs || msgs.length === 0) continue;
-
-        allMessages.push(...msgs);
-
-        for (const m of msgs) {
-          if (!messagesByUser.has(m.author.id)) messagesByUser.set(m.author.id, []);
-          messagesByUser.get(m.author.id).push(m);
-        }
-
-        await new Promise(r => setTimeout(r, 150));
-      }
-
-      // Compute nameMap and metricsMap for this guild/date
-      const nameMap = {};
-      const metricsMap = {};
-      for (const [uid, member] of membersMap) {
-        nameMap[uid] = getDisplayName(member);
-        const msgs = messagesByUser.get(uid) || [];
-        const messageCount = msgs.length;
-        let activeWindow, mentions, firstMessageBucket;
-        if (messageCount > 0) {
-          const hours = msgs.map(m => new Date(m.createdTimestamp).getUTCHours());
-          const minHour = Math.min(...hours);
-          const maxHour = Math.max(...hours);
-          const bucketRange = `${bucketTime(new Date(minHour * 3600 * 1000))} — ${bucketTime(new Date(maxHour * 3600 * 1000))}`;
-          activeWindow = bucketRange;
-          mentions = msgs.reduce((acc, m) => acc + (m.mentions?.users?.size || 0), 0);
-          const firstMsg = msgs.reduce((a, b) => (a.createdTimestamp < b.createdTimestamp ? a : b));
-          firstMessageBucket = bucketTime(new Date(firstMsg.createdTimestamp));
-        } else {
-          activeWindow = "Not active"; // 'Not Active'
-          mentions = 0;
-          firstMessageBucket = null;
-        }
-        const topWord = messageCount > 0 ? (topNonCommonWord(msgs) || null) : null;
-        const ageStr = member ? accountAgeRange(new Date(member.user.createdTimestamp)) : null;
-        metricsMap[uid] = {
-          messageCount,
-          topWord,
-          activeWindow,
-          mentions,
-          firstMessageBucket,
-          accountAgeRange: ageStr
-        };
-      }
-
-      // Build puzzles
-      const friendle = await buildFriendlePayload(guild, messagesByUser, membersMap, dateLabel);
-      const quotele = await buildQuotelePayload(guild, allMessages, dateLabel);
-      const mediale = await buildMedialePayload(guild, allMessages, dateLabel);
-      const statle = await buildStatlePayload(guild, allMessages, dateLabel);
-
-      // Attach solution display names and metrics
-      if (friendle) {
-        friendle.solution_user_name = nameMap[friendle.solution_user_id] || null;
-        friendle.solution_metrics = metricsMap[friendle.solution_user_id] || null;
-      }
-      if (quotele) quotele.solution_user_name = nameMap[quotele.solution_user_id] || null;
-      if (mediale) mediale.solution_user_name = nameMap[mediale.solution_user_id] || null;
-      if (statle) statle.solution_user_name = nameMap[statle.solution_user_id] || null;
-
-      // Post puzzles individually
-      const puzzles = [friendle, quotele, mediale, statle].filter(Boolean);
-      for (const p of puzzles) {
-        await postPuzzleToWebsite(guildId, p);
-      }
-
-      // Post metadata (names and metrics) once per guild/day
-      const metadataPayload = {
-        guild_id: guildId,
-        date: dateLabel,
-        names: nameMap,
-        metrics: metricsMap
-      };
-      const metadataJson = JSON.stringify(metadataPayload);
-      const metadataSig = hmacSign(metadataJson);
-      await axios.post(`${WEBSITE_ENDPOINT}/metadata`, metadataJson, {
-        headers: {
-          'X-Signature': metadataSig,
-          'Content-Type': 'application/json'
-        },
-        timeout: 10000,
-        transformRequest: [data => data],
-        validateStatus: () => true
-      });
-
-      console.log(`Puzzles for ${guildId}:`, puzzles.map(p => p.game));
+      await generatePuzzlesForGuild(guild, dateLabel, start, end);
     } catch (err) {
       console.error('Error processing guild', guildId, err.message);
     }
@@ -519,6 +457,127 @@ async function postPuzzleToWebsite(guildId, puzzle) {
   }
 }
 
+async function generatePuzzlesForGuild(guild, dateLabel, start, end) {
+  const guildId = guild.id;
+  await guild.members.fetch();
+  const membersMap = new Map(guild.members.cache.map(m => [m.user.id, m]));
+
+  const optedInMembers = storage.optInUsers.filter(uid => membersMap.has(uid));
+  if (optedInMembers.length === 0) {
+    console.log('No opted-in members for guild', guildId);
+    return { puzzles: [], generated: false, reason: 'no_opted_in' };
+  }
+
+  const channels = guild.channels.cache.filter(
+    c => c.isTextBased() && c.viewable && !c.nsfw && c.type === 0 // 0 = GUILD_TEXT
+  );
+
+  const allMessages = [];
+  const messagesByUser = new Map();
+
+  for (const [, channel] of channels) {
+    const msgs = await fetchMessagesInRange(channel, start, end);
+    if (!msgs || msgs.length === 0) continue;
+
+    allMessages.push(...msgs);
+
+    for (const m of msgs) {
+      if (!messagesByUser.has(m.author.id)) messagesByUser.set(m.author.id, []);
+      messagesByUser.get(m.author.id).push(m);
+    }
+
+    await new Promise(r => setTimeout(r, 150));
+  }
+
+  // Compute nameMap and metricsMap for this guild/date
+  const nameMap = {};
+  const metricsMap = {};
+  for (const [uid, member] of membersMap) {
+    nameMap[uid] = getDisplayName(member);
+    const msgs = messagesByUser.get(uid) || [];
+    const messageCount = msgs.length;
+    let activeWindow, mentions, firstMessageBucket;
+    if (messageCount > 0) {
+      const hours = msgs.map(m => new Date(m.createdTimestamp).getUTCHours());
+      const minHour = Math.min(...hours);
+      const maxHour = Math.max(...hours);
+      const bucketRange = `${bucketTime(new Date(minHour * 3600 * 1000))} — ${bucketTime(new Date(maxHour * 3600 * 1000))}`;
+      activeWindow = bucketRange;
+      mentions = msgs.reduce((acc, m) => acc + (m.mentions?.users?.size || 0), 0);
+      const firstMsg = msgs.reduce((a, b) => (a.createdTimestamp < b.createdTimestamp ? a : b));
+      firstMessageBucket = bucketTime(new Date(firstMsg.createdTimestamp));
+    } else {
+      activeWindow = 'Not active';
+      mentions = 0;
+      firstMessageBucket = null;
+    }
+    const topWord = messageCount > 0 ? (topNonCommonWord(msgs) || null) : null;
+    const ageStr = member ? accountAgeRange(new Date(member.user.createdTimestamp)) : null;
+    metricsMap[uid] = {
+      messageCount,
+      topWord,
+      activeWindow,
+      mentions,
+      firstMessageBucket,
+      accountAgeRange: ageStr
+    };
+  }
+
+  // Build puzzles
+  const friendle = await buildFriendlePayload(guild, messagesByUser, membersMap, dateLabel);
+  const quotele = await buildQuotelePayload(guild, allMessages, dateLabel);
+  const mediale = await buildMedialePayload(guild, allMessages, dateLabel);
+  const statle = await buildStatlePayload(guild, allMessages, dateLabel);
+
+  // Attach solution display names and metrics
+  if (friendle) {
+    friendle.solution_user_name = nameMap[friendle.solution_user_id] || null;
+    friendle.solution_metrics = metricsMap[friendle.solution_user_id] || null;
+  }
+  if (quotele) quotele.solution_user_name = nameMap[quotele.solution_user_id] || null;
+  if (mediale) mediale.solution_user_name = nameMap[mediale.solution_user_id] || null;
+  if (statle) statle.solution_user_name = nameMap[statle.solution_user_id] || null;
+
+  // Post puzzles individually
+  const puzzles = [friendle, quotele, mediale, statle].filter(Boolean);
+  for (const p of puzzles) {
+    await postPuzzleToWebsite(guildId, p);
+  }
+
+  // Post metadata (names and metrics) once per guild/day
+  const metadataPayload = {
+    guild_id: guildId,
+    date: dateLabel,
+    names: nameMap,
+    metrics: metricsMap
+  };
+  const metadataJson = JSON.stringify(metadataPayload);
+  const metadataSig = hmacSign(metadataJson);
+  await axios.post(`${WEBSITE_ENDPOINT}/metadata`, metadataJson, {
+    headers: {
+      'X-Signature': metadataSig,
+      'Content-Type': 'application/json'
+    },
+    timeout: 10000,
+    transformRequest: [data => data],
+    validateStatus: () => true
+  });
+
+  storage.lastRunByGuild[guildId] = dateLabel;
+  saveStorage();
+
+  console.log(`Puzzles for ${guildId}:`, puzzles.map(p => p.game));
+  return { puzzles, generated: true };
+}
+
+function getYesterdayRangeUtc() {
+  const now = new Date();
+  const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0) - 1);
+  const start = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), end.getUTCDate(), 0, 0, 0));
+  const dateLabel = start.toISOString().slice(0, 10);
+  return { start, end, dateLabel };
+}
+
 // ------------------------------------------------------------------
 // Interaction handlers
 // ------------------------------------------------------------------
@@ -534,6 +593,48 @@ client.on('interactionCreate', async interaction => {
         content: 'You are now opted in to Friendle puzzles. You can opt out with /optout',
         ephemeral: true
       });
+    } else if (commandName === 'play') {
+      if (!interaction.guildId) {
+        await interaction.reply({
+          content: 'This command can only be used inside a server.',
+          ephemeral: true
+        });
+        return;
+      }
+      const game = interaction.options.getString('game');
+      const { start, end, dateLabel } = getYesterdayRangeUtc();
+      const lastGenerated = storage.lastRunByGuild?.[interaction.guildId] || null;
+      if (lastGenerated !== dateLabel) {
+        const guild = client.guilds.cache.get(interaction.guildId);
+        if (!guild) {
+          await interaction.reply({
+            content: 'Could not find this server in the bot cache. Please try again in a moment.',
+            ephemeral: true
+          });
+          return;
+        }
+        await interaction.deferReply();
+        const result = await generatePuzzlesForGuild(guild, dateLabel, start, end);
+        if (result.reason === 'no_opted_in') {
+          await interaction.editReply('No one in this server has opted in yet. Use /optin to get started.');
+          return;
+        }
+      }
+      const playUrl = buildPlayUrl(interaction.guildId, game);
+      if (!playUrl) {
+        await interaction.reply({
+          content: 'Play link is not configured. Ask the admin to set FRONTEND_URL for the bot.',
+          ephemeral: true
+        });
+        return;
+      }
+      const label = game ? ` (${game})` : '';
+      const response = `Play Friendle for this server${label}: ${playUrl}`;
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply(response);
+      } else {
+        await interaction.reply({ content: response });
+      }
     } else if (commandName === 'optout') {
       const uid = interaction.user.id;
       storage.optInUsers = storage.optInUsers.filter(u => u !== uid);
