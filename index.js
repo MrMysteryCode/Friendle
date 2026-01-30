@@ -80,21 +80,7 @@ const client = new Client({
 const commands = [
   {
     name: 'play',
-    description: 'Get a Friendle play link for this server',
-    options: [
-      {
-        name: 'game',
-        description: 'Optional game to open',
-        type: 3,
-        required: false,
-        choices: [
-          { name: 'Classic (Friendle Daily)', value: 'friendle_daily' },
-          { name: 'Quotele', value: 'quotele' },
-          { name: 'Mediale', value: 'mediale' },
-          { name: 'Statle', value: 'statle' }
-        ]
-      }
-    ]
+    description: 'Get a Friendle play link for this server'
   },
   { name: 'optin', description: 'Opt in to Friendle puzzles (allow your public activity to be used)' },
   { name: 'optout', description: 'Opt out of Friendle puzzles' },
@@ -182,13 +168,14 @@ function getDisplayName(member) {
   return member.nickname || member.user.globalName || member.user.username;
 }
 
-function buildPlayUrl(guildId, game) {
+function buildPlayUrl(guildId) {
   if (!FRONTEND_URL) return null;
   try {
     const url = new URL(FRONTEND_URL);
-    url.searchParams.set('guild', guildId);
-    if (game) url.searchParams.set('game', game);
-    return url.toString();
+    let base = url.origin + url.pathname;
+    if (!base.endsWith('/')) base += '/';
+    const params = new URLSearchParams({ guild: guildId });
+    return `${base}#/play?${params.toString()}`;
   } catch (err) {
     return null;
   }
@@ -601,7 +588,6 @@ client.on('interactionCreate', async interaction => {
         });
         return;
       }
-      const game = interaction.options.getString('game');
       const { start, end, dateLabel } = getYesterdayRangeUtc();
       const lastGenerated = storage.lastRunByGuild?.[interaction.guildId] || null;
       if (lastGenerated !== dateLabel) {
@@ -620,7 +606,7 @@ client.on('interactionCreate', async interaction => {
           return;
         }
       }
-      const playUrl = buildPlayUrl(interaction.guildId, game);
+      const playUrl = buildPlayUrl(interaction.guildId);
       if (!playUrl) {
         await interaction.reply({
           content: 'Play link is not configured. Ask the admin to set FRONTEND_URL for the bot.',
@@ -628,8 +614,7 @@ client.on('interactionCreate', async interaction => {
         });
         return;
       }
-      const label = game ? ` (${game})` : '';
-      const response = `Play Friendle for this server${label}: ${playUrl}`;
+      const response = `Play Friendle for this server: ${playUrl}`;
       if (interaction.deferred || interaction.replied) {
         await interaction.editReply(response);
       } else {
