@@ -180,6 +180,8 @@ function topNonCommonWord(messages) {
   for (const m of messages) {
     const words = m.content.toLowerCase().replace(/[^a-z0-9' ]+/g, ' ').split(/\s+/).filter(Boolean);
     for (const w of words) {
+      if (/^\d+$/.test(w)) continue;
+      if (w.length >= 15 && /\d/.test(w)) continue;
       if (!stop.has(w) && w.length > 2) freq[w] = (freq[w] || 0) + 1;
     }
   }
