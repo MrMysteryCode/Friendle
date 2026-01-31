@@ -142,10 +142,28 @@ function hmacSign(payloadJson) {
  */
 function anonymizeText(text) {
   return text
-    .replace(/<@!?\d+>/g, '[mention]')
-    .replace(/@\w+/g, '[mention]')
+    .replace(/<@!?\d+>/g, '@person')
+    .replace(/@\w+/g, '@person')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+/**
+ * Replace Discord mention tokens with readable names.
+ * @param {string} text
+ * @param {import('discord.js').MessageMentions} mentions
+ * @returns {string}
+ */
+function renderMentions(text, mentions) {
+  if (!text || !mentions?.users) return text || '';
+  let output = String(text);
+  for (const [id, user] of mentions.users) {
+    const display = user.globalName || user.username || 'user';
+    const label = `@${display}`;
+    const token = new RegExp(`<@!?${id}>`, 'g');
+    output = output.replace(token, label);
+  }
+  return output;
 }
 
 /**
@@ -710,6 +728,7 @@ async function buildQuotelePayload(guild, allMessages, dateLabel) {
 
   const msg = pickRandomMessage(longMsgs);
 
+  const originalRaw = renderMentions(msg.content, msg.mentions);
   const originalClean = anonymizeText(msg.content);
   const originalNorm = normalizeQuoteForHash(originalClean);
   if (!originalNorm || originalNorm.length < 10) return null;
@@ -725,6 +744,8 @@ async function buildQuotelePayload(guild, allMessages, dateLabel) {
     quote_scrambled: scrambled,
     // full (unscrambled) quote for reveal
     quote_original: originalClean,
+    // raw quote with readable mentions for reveal
+    quote_original_raw: originalRaw,
 
     // store hash so frontend can validate typed quote
     quote_hash: sha256Hex(originalNorm),
