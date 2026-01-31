@@ -140,6 +140,17 @@ function scrambleWords(text) {
   return pureWords.join(' ');
 }
 
+function containsUrlLike(text) {
+  if (!text) return false;
+  const urlPattern = /(https?:\/\/\S+|www\.\S+)/i;
+  if (urlPattern.test(text)) return true;
+  const invitePattern = /\bdiscord\.gg\/\S+|\bdiscord\.com\/invite\/\S+/i;
+  if (invitePattern.test(text)) return true;
+  const domainPattern =
+    /\b(?:[a-z0-9-]+\.)+(?:com|net|org|io|gg|co|edu|gov|uk|ca|de|fr|jp|tv|me|app|dev|ai|xyz|info|biz|ly|to|us|ru|br|in|au|nl|se|no|fi|dk|es|it|pt|pl|cz|ch|be|at)\b/i;
+  return domainPattern.test(text);
+}
+
 function bucketTime(date) {
   const hour = date.getUTCHours();
   if (hour >= 5 && hour < 12) return 'Morning';
@@ -179,6 +190,15 @@ function topNonCommonWord(messages) {
 function getDisplayName(member) {
   // Use nickname, globalName, or username (prioritised)
   return member.nickname || member.user.globalName || member.user.username;
+}
+
+function hasImageAttachment(message) {
+  if (!message || !message.attachments || message.attachments.size === 0) return false;
+  const attachment = message.attachments.first();
+  if (!attachment) return false;
+  const ext = attachment.name ? attachment.name.split('.').pop().toLowerCase() : '';
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(ext)) return true;
+  return Boolean(attachment.contentType && attachment.contentType.startsWith('image'));
 }
 
 function buildPlayUrl(guildId) {
@@ -286,30 +306,57 @@ async function collectRecentMessages(channels, perChannelLimit = 50, totalLimit 
   return { allMessages: trimmed, messagesByUser, dateLabel };
 }
 
-async function collectRecentOptInMessages(
-  channels,
-  optedInSet,
-  perPage = 100,
-  maxPages = 8,
-  totalLimit = 500
-) {
-  const collected = [];
+function getChannelScanList(channels) {
+  const list = Array.from(channels.values());
+  const toSnowflake = id => {
+    if (!id) return 0n;
+    try {
+      return BigInt(id);
+    } catch (err) {
+      return 0n;
+    }
+  };
+  list.sort((a, b) => {
+    const aId = toSnowflake(a.lastMessageId);
+    const bId = toSnowflake(b.lastMessageId);
+    if (aId === bId) return 0;
+    return aId > bId ? -1 : 1;
+  });
+  return list;
+}
 
-  for (const [, channel] of channels) {
+async function collectRecentOptInMessages(channels, optedInSet, options = {}) {
+  const {
+    perPage = 100,
+    maxPages = 25,
+    totalLimit = 500,
+    minMessageCount = 15,
+    maxTotalFetches = 200,
+    shouldInclude = null
+  } = options;
+  const collected = [];
+  const channelList = getChannelScanList(channels);
+  const minTarget = Math.min(minMessageCount, totalLimit);
+  let fetches = 0;
+
+  scanLoop: for (const channel of channelList) {
     let lastId = null;
     for (let page = 0; page < maxPages && collected.length < totalLimit; page += 1) {
+      if (fetches >= maxTotalFetches) break scanLoop;
       try {
-        const options = { limit: perPage };
-        if (lastId) options.before = lastId;
-        const fetched = await channel.messages.fetch(options);
+        const fetchOptions = { limit: perPage };
+        if (lastId) fetchOptions.before = lastId;
+        const fetched = await channel.messages.fetch(fetchOptions);
+        fetches += 1;
         if (!fetched || fetched.size === 0) break;
         for (const msg of fetched.values()) {
-          if (optedInSet.has(msg.author.id)) {
-            collected.push(msg);
-          }
+          if (!optedInSet.has(msg.author.id)) continue;
+          if (shouldInclude && !shouldInclude(msg)) continue;
+          collected.push(msg);
         }
         lastId = fetched.last().id;
         if (fetched.size < perPage) break;
+        if (collected.length >= minTarget) break scanLoop;
         await new Promise(r => setTimeout(r, 150));
       } catch (err) {
         break;
@@ -389,16 +436,17 @@ async function buildQuotelePayload(guild, allMessages, dateLabel) {
   const longMsgs = allMessages
     .filter(m => m.content && m.content.length >= MIN_QUOTE_LENGTH)
     // reject messages that look like URLs
-    .filter(m => !/(https?:\/\/\S+|www\.\S+)/i.test(m.content));
+    .filter(m => !containsUrlLike(m.content));
 
   if (longMsgs.length === 0) return null;
 
   const msg = pickRandomMessage(longMsgs);
 
-  const originalNorm = normalizeQuoteForHash(msg.content);
+  const originalClean = anonymizeText(msg.content);
+  const originalNorm = normalizeQuoteForHash(originalClean);
   if (!originalNorm || originalNorm.length < 10) return null;
 
-  const scrambled = scrambleWords(anonymizeText(msg.content));
+  const scrambled = scrambleWords(originalClean);
 
   return {
     game: 'quotele',
@@ -407,6 +455,8 @@ async function buildQuotelePayload(guild, allMessages, dateLabel) {
 
     // show only scrambled quote
     quote_scrambled: scrambled,
+    // full (unscrambled) quote for reveal
+    quote_original: originalClean,
 
     // store hash so frontend can validate typed quote
     quote_hash: sha256Hex(originalNorm),
@@ -436,13 +486,7 @@ function sha256Hex(text) {
 
 async function buildMedialePayload(guild, allMessages, dateLabel) {
   const mediaMsgs = allMessages
-    .filter(m => m.attachments && m.attachments.size > 0)
-    .filter(m => {
-      const a = m.attachments.first();
-      if (!a) return false;
-      const ext = a.name ? a.name.split('.').pop().toLowerCase() : '';
-      return ['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(ext) || (a.contentType && a.contentType.startsWith('image'));
-    });
+    .filter(m => hasImageAttachment(m));
   if (mediaMsgs.length === 0) return null;
   const msg = pickRandomMessage(mediaMsgs);
   const attachment = msg.attachments.first();
@@ -586,7 +630,7 @@ async function generatePuzzlesForGuild(guild) {
   const optedInSet = new Set(optedInMembers);
 
   const channels = guild.channels.cache.filter(
-    c => c.isTextBased() && c.viewable && !c.nsfw && c.type === 0 // 0 = GUILD_TEXT
+    c => c.isTextBased() && c.viewable && !c.nsfw
   );
 
   const yesterdayRange = getDayRangeUtc(-1);
@@ -611,7 +655,13 @@ async function generatePuzzlesForGuild(guild) {
   }
 
   if (allMessages.length === 0) {
-    const fallback = await collectRecentOptInMessages(channels, optedInSet);
+    const fallback = await collectRecentOptInMessages(channels, optedInSet, {
+      perPage: 100,
+      maxPages: 25,
+      totalLimit: 500,
+      minMessageCount: 15,
+      maxTotalFetches: 200
+    });
     allMessages = fallback.allMessages;
     messagesByUser = fallback.messagesByUser;
     dateLabel = getNewestMessageDateLabel(allMessages, fallback.dateLabel || dateLabel);
@@ -658,9 +708,49 @@ async function generatePuzzlesForGuild(guild) {
 
   // Build puzzles
   const friendle = await buildFriendlePayload(guild, messagesByUser, membersMap, dateLabel);
-  const quotele = await buildQuotelePayload(guild, allMessages, dateLabel);
-  const mediale = await buildMedialePayload(guild, allMessages, dateLabel);
-  const statle = await buildStatlePayload(guild, allMessages, dateLabel);
+  let quotele = await buildQuotelePayload(guild, allMessages, dateLabel);
+  let mediale = await buildMedialePayload(guild, allMessages, dateLabel);
+  let statle = await buildStatlePayload(guild, allMessages, dateLabel);
+
+  // Fallbacks per puzzle type (scan further back for matching content)
+  if (!quotele) {
+    const quoteFallback = await collectRecentOptInMessages(channels, optedInSet, {
+      perPage: 100,
+      maxPages: 50,
+      totalLimit: 800,
+      minMessageCount: 10,
+      maxTotalFetches: 350,
+      shouldInclude: msg =>
+        Boolean(msg.content && msg.content.length >= MIN_QUOTE_LENGTH && !containsUrlLike(msg.content))
+    });
+    const quoteDate = getNewestMessageDateLabel(quoteFallback.allMessages, quoteFallback.dateLabel || dateLabel);
+    quotele = await buildQuotelePayload(guild, quoteFallback.allMessages, quoteDate);
+  }
+
+  if (!mediale) {
+    const mediaFallback = await collectRecentOptInMessages(channels, optedInSet, {
+      perPage: 100,
+      maxPages: 60,
+      totalLimit: 200,
+      minMessageCount: 1,
+      maxTotalFetches: 350,
+      shouldInclude: msg => hasImageAttachment(msg)
+    });
+    const mediaDate = getNewestMessageDateLabel(mediaFallback.allMessages, mediaFallback.dateLabel || dateLabel);
+    mediale = await buildMedialePayload(guild, mediaFallback.allMessages, mediaDate);
+  }
+
+  if (!statle) {
+    const statFallback = await collectRecentOptInMessages(channels, optedInSet, {
+      perPage: 100,
+      maxPages: 40,
+      totalLimit: 800,
+      minMessageCount: 50,
+      maxTotalFetches: 350
+    });
+    const statDate = getNewestMessageDateLabel(statFallback.allMessages, statFallback.dateLabel || dateLabel);
+    statle = await buildStatlePayload(guild, statFallback.allMessages, statDate);
+  }
 
   // Attach solution display names and metrics
   if (friendle) {
@@ -747,6 +837,12 @@ client.on('interactionCreate', async interaction => {
         const result = await generatePuzzlesForGuild(guild);
         if (result.reason === 'no_opted_in') {
           await interaction.editReply('No one in this server has opted in yet. Use /optin to get started.');
+          return;
+        }
+        if (result.reason === 'no_opted_in_messages') {
+          await interaction.editReply(
+            'Could not find any messages from opted-in members in this server yet. Ask them to say something after opting in.'
+          );
           return;
         }
       }
