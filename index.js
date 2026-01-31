@@ -838,7 +838,10 @@ async function generatePuzzlesForGuild(guild) {
     guild_id: guildId,
     date: metadataDateLabel,
     names: nameMap,
-    metrics: metricsMap
+    metrics: metricsMap,
+    allowed_usernames: optedInMembers
+      .map(uid => nameMap[uid])
+      .filter(Boolean)
   };
   const metadataJson = JSON.stringify(metadataPayload);
   const metadataSig = hmacSign(metadataJson);
