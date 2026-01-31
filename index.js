@@ -96,7 +96,8 @@ const commands = [
   },
   { name: 'optin', description: 'Opt in to Friendle puzzles (allow your public activity to be used)' },
   { name: 'optout', description: 'Opt out of Friendle puzzles' },
-  { name: 'force_generate', description: 'Force puzzle generation now (admin only)' }
+  { name: 'force_generate', description: 'Force puzzle generation now (admin only)' },
+  { name: 'clear_history', description: 'Clear local puzzle history for this server (admin only)' }
 ];
 
 async function registerCommands() {
@@ -283,6 +284,68 @@ async function collectRecentMessages(channels, perChannelLimit = 50, totalLimit 
     : null;
 
   return { allMessages: trimmed, messagesByUser, dateLabel };
+}
+
+async function collectRecentOptInMessages(
+  channels,
+  optedInSet,
+  perPage = 100,
+  maxPages = 8,
+  totalLimit = 500
+) {
+  const collected = [];
+
+  for (const [, channel] of channels) {
+    let lastId = null;
+    for (let page = 0; page < maxPages && collected.length < totalLimit; page += 1) {
+      try {
+        const options = { limit: perPage };
+        if (lastId) options.before = lastId;
+        const fetched = await channel.messages.fetch(options);
+        if (!fetched || fetched.size === 0) break;
+        for (const msg of fetched.values()) {
+          if (optedInSet.has(msg.author.id)) {
+            collected.push(msg);
+          }
+        }
+        lastId = fetched.last().id;
+        if (fetched.size < perPage) break;
+        await new Promise(r => setTimeout(r, 150));
+      } catch (err) {
+        break;
+      }
+    }
+  }
+
+  collected.sort((a, b) => b.createdTimestamp - a.createdTimestamp);
+  const trimmed = totalLimit ? collected.slice(0, totalLimit) : collected;
+  const messagesByUser = new Map();
+  for (const m of trimmed) {
+    if (!messagesByUser.has(m.author.id)) messagesByUser.set(m.author.id, []);
+    messagesByUser.get(m.author.id).push(m);
+  }
+
+  const dateLabel = trimmed.length
+    ? new Date(trimmed[0].createdTimestamp).toISOString().slice(0, 10)
+    : null;
+
+  return { allMessages: trimmed, messagesByUser, dateLabel };
+}
+
+function filterMessagesByOptIn(allMessages, optedInSet) {
+  const filtered = allMessages.filter(m => optedInSet.has(m.author.id));
+  const messagesByUser = new Map();
+  for (const m of filtered) {
+    if (!messagesByUser.has(m.author.id)) messagesByUser.set(m.author.id, []);
+    messagesByUser.get(m.author.id).push(m);
+  }
+  return { allMessages: filtered, messagesByUser };
+}
+
+function getNewestMessageDateLabel(messages, fallbackLabel) {
+  if (!messages || messages.length === 0) return fallbackLabel;
+  const newest = messages.reduce((a, b) => (a.createdTimestamp > b.createdTimestamp ? a : b));
+  return new Date(newest.createdTimestamp).toISOString().slice(0, 10);
 }
 
 // ------------------------------------------------------------------
@@ -520,6 +583,7 @@ async function generatePuzzlesForGuild(guild) {
     console.log('No opted-in members for guild', guildId);
     return { puzzles: [], generated: false, reason: 'no_opted_in' };
   }
+  const optedInSet = new Set(optedInMembers);
 
   const channels = guild.channels.cache.filter(
     c => c.isTextBased() && c.viewable && !c.nsfw && c.type === 0 // 0 = GUILD_TEXT
@@ -535,24 +599,27 @@ async function generatePuzzlesForGuild(guild) {
 
   for (const range of ranges) {
     const result = await collectMessagesForRange(channels, range.start, range.end);
-    if (result.allMessages.length > 0) {
-      allMessages = result.allMessages;
-      messagesByUser = result.messagesByUser;
-      dateLabel = range.dateLabel;
-      break;
-    }
+    if (result.allMessages.length === 0) continue;
+
+    const filtered = filterMessagesByOptIn(result.allMessages, optedInSet);
+    if (filtered.allMessages.length === 0) continue;
+
+    allMessages = filtered.allMessages;
+    messagesByUser = filtered.messagesByUser;
+    dateLabel = range.dateLabel;
+    break;
   }
 
   if (allMessages.length === 0) {
-    const fallback = await collectRecentMessages(channels);
+    const fallback = await collectRecentOptInMessages(channels, optedInSet);
     allMessages = fallback.allMessages;
     messagesByUser = fallback.messagesByUser;
-    if (fallback.dateLabel) dateLabel = fallback.dateLabel;
+    dateLabel = getNewestMessageDateLabel(allMessages, fallback.dateLabel || dateLabel);
   }
 
   if (allMessages.length === 0) {
-    console.log('No recent messages available for guild', guildId);
-    return { puzzles: [], generated: false, reason: 'no_messages' };
+    console.log('No recent opted-in messages available for guild', guildId);
+    return { puzzles: [], generated: false, reason: 'no_opted_in_messages' };
   }
 
   // Compute nameMap and metricsMap for this guild/date
@@ -715,6 +782,30 @@ client.on('interactionCreate', async interaction => {
       }
       await interaction.reply({ content: 'Forcing generation now...', ephemeral: true });
       await generateDailyPuzzles();
+    } else if (commandName === 'clear_history') {
+      if (!interaction.memberPermissions || !interaction.memberPermissions.has('ManageGuild')) {
+        await interaction.reply({
+          content: 'You must be a guild admin to use this.',
+          ephemeral: true
+        });
+        return;
+      }
+      if (!interaction.guildId) {
+        await interaction.reply({
+          content: 'This command can only be used inside a server.',
+          ephemeral: true
+        });
+        return;
+      }
+      if (storage.lastRunByGuild && storage.lastRunByGuild[interaction.guildId]) {
+        delete storage.lastRunByGuild[interaction.guildId];
+      }
+      storage.lastRun = null;
+      saveStorage();
+      await interaction.reply({
+        content: 'Cleared local puzzle history for this server.',
+        ephemeral: true
+      });
     }
   } catch (err) {
     console.error('interaction handler error', err);
