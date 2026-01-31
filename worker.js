@@ -224,11 +224,15 @@ export default {
         });
       }
       if (Array.isArray(payload.allowed_usernames)) {
+        const cleanedAllowed = payload.allowed_usernames.filter(Boolean);
         await kv.put(
           `guild:${guildId}:date:${date}:allowed_usernames`,
-          JSON.stringify(payload.allowed_usernames.filter(Boolean)),
+          JSON.stringify(cleanedAllowed),
           { expirationTtl: 60 * 60 * 24 * 365 }
         );
+        await kv.put(`guild:${guildId}:allowed_usernames`, JSON.stringify(cleanedAllowed), {
+          expirationTtl: 60 * 60 * 24 * 365,
+        });
       }
 
       return json({ ok: true }, 200, corsHeaders);
@@ -258,7 +262,11 @@ export default {
       const allowedJson = await kv.get(`guild:${guildId}:date:${date}:allowed_usernames`);
       const names = namesJson ? JSON.parse(namesJson) : {};
       const metrics = metricsJson ? JSON.parse(metricsJson) : {};
-      const allowedUsernames = allowedJson ? JSON.parse(allowedJson) : [];
+      let allowedUsernames = allowedJson ? JSON.parse(allowedJson) : [];
+      if (!Array.isArray(allowedUsernames) || allowedUsernames.length === 0) {
+        const guildAllowed = await kv.get(`guild:${guildId}:allowed_usernames`);
+        allowedUsernames = guildAllowed ? JSON.parse(guildAllowed) : [];
+      }
 
       if (game) {
         const key = `guild:${guildId}:date:${date}:game:${game}`;
