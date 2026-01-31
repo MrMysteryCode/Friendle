@@ -178,7 +178,18 @@ function topNonCommonWord(messages) {
   ]);
   const freq = {};
   for (const m of messages) {
-    const words = m.content.toLowerCase().replace(/[^a-z0-9' ]+/g, ' ').split(/\s+/).filter(Boolean);
+    const content = (m.content || '').trim();
+    if (!content) {
+      if (hasImageAttachment(m)) continue;
+    }
+    if (containsUrlLike(content)) {
+      if (hasImageAttachment(m) || content.length < 12) continue;
+    }
+    const words = content
+      .toLowerCase()
+      .replace(/[^a-z0-9' ]+/g, ' ')
+      .split(/\s+/)
+      .filter(Boolean);
     for (const w of words) {
       if (!/[a-z]/.test(w)) continue;
       if (/^\d+$/.test(w)) continue;
