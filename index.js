@@ -71,6 +71,9 @@ if (fs.existsSync(STORAGE_PATH)) {
     console.warn('Could not parse storage file, using defaults.');
   }
 }
+/**
+ * Persist opt-in state and last-run timestamps to disk.
+ */
 function saveStorage() {
   fs.writeFileSync(STORAGE_PATH, JSON.stringify(storage, null, 2));
 }
@@ -100,6 +103,10 @@ const commands = [
   { name: 'clear_history', description: 'Clear local puzzle history for this server (admin only)' }
 ];
 
+/**
+ * Register slash commands either globally or scoped to a single guild.
+ * Uses guild-scoped registration when GUILD_ID is provided for faster propagation.
+ */
 async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
   try {
@@ -118,10 +125,20 @@ async function registerCommands() {
 // ------------------------------------------------------------------
 // Utility functions
 // ------------------------------------------------------------------
+/**
+ * Create an HMAC signature for a JSON payload.
+ * @param {string} payloadJson
+ * @returns {string} hex-encoded HMAC-SHA256 signature
+ */
 function hmacSign(payloadJson) {
   return crypto.createHmac('sha256', WEBHOOK_SECRET).update(payloadJson).digest('hex');
 }
 
+/**
+ * Remove personally identifying patterns (mentions) and normalize whitespace.
+ * @param {string} text
+ * @returns {string}
+ */
 function anonymizeText(text) {
   return text
     .replace(/<@!?\d+>/g, '[mention]')
@@ -130,6 +147,11 @@ function anonymizeText(text) {
     .trim();
 }
 
+/**
+ * Shuffle word order while keeping word boundaries intact.
+ * @param {string} text
+ * @returns {string}
+ */
 function scrambleWords(text) {
   const words = text.split(/(\s+)/).filter(Boolean);
   const pureWords = words.filter(w => !/\s+/.test(w));
@@ -140,6 +162,11 @@ function scrambleWords(text) {
   return pureWords.join(' ');
 }
 
+/**
+ * Detect URLs, invites, or domain-like strings to avoid using them as puzzle content.
+ * @param {string} text
+ * @returns {boolean}
+ */
 function containsUrlLike(text) {
   if (!text) return false;
   const urlPattern = /(https?:\/\/\S+|www\.\S+)/i;
@@ -151,6 +178,11 @@ function containsUrlLike(text) {
   return domainPattern.test(text);
 }
 
+/**
+ * Convert a UTC time into a coarse time-of-day bucket.
+ * @param {Date} date
+ * @returns {string}
+ */
 function bucketTime(date) {
   const hour = date.getUTCHours();
   if (hour >= 5 && hour < 12) return 'Morning';
@@ -159,6 +191,11 @@ function bucketTime(date) {
   return 'Night';
 }
 
+/**
+ * Map account age to a human-friendly range.
+ * @param {Date} createdAt
+ * @returns {string}
+ */
 function accountAgeRange(createdAt) {
   const years = (Date.now() - createdAt.getTime()) / (1000 * 60 * 60 * 24 * 365);
   if (years < 1) return 'Less than 1 year';
@@ -167,6 +204,11 @@ function accountAgeRange(createdAt) {
   return '4+ years';
 }
 
+/**
+ * Find the most frequent non-common word in a set of messages.
+ * @param {Array} messages
+ * @returns {string|null}
+ */
 function topNonCommonWord(messages) {
   const stop = new Set([
     'the','be','to','of','and','a','in','that','have','i','it','for','not','on','with','he','as','you','do','at',
@@ -201,11 +243,21 @@ function topNonCommonWord(messages) {
   return entries[0] ? entries[0][0] : null;
 }
 
+/**
+ * Choose a display name for a guild member.
+ * @param {import('discord.js').GuildMember} member
+ * @returns {string}
+ */
 function getDisplayName(member) {
   // Use nickname, globalName, or username (prioritised)
   return member.nickname || member.user.globalName || member.user.username;
 }
 
+/**
+ * Check whether a message contains an image attachment.
+ * @param {import('discord.js').Message} message
+ * @returns {boolean}
+ */
 function hasImageAttachment(message) {
   if (!message || !message.attachments || message.attachments.size === 0) return false;
   const attachment = message.attachments.first();
@@ -215,6 +267,11 @@ function hasImageAttachment(message) {
   return Boolean(attachment.contentType && attachment.contentType.startsWith('image'));
 }
 
+/**
+ * Gather readable, non-NSFW text channels and active threads.
+ * @param {import('discord.js').Guild} guild
+ * @returns {Promise<Map<string, import('discord.js').GuildBasedChannel>>}
+ */
 async function getReadableTextChannels(guild) {
   const channels = new Map();
   for (const [id, channel] of guild.channels.cache) {
@@ -236,6 +293,11 @@ async function getReadableTextChannels(guild) {
   return channels;
 }
 
+/**
+ * Build a play URL for the frontend for a given guild.
+ * @param {string} guildId
+ * @returns {string|null}
+ */
 function buildPlayUrl(guildId) {
   if (!FRONTEND_URL) return null;
   try {
@@ -249,6 +311,11 @@ function buildPlayUrl(guildId) {
   }
 }
 
+/**
+ * Compute UTC day start/end boundaries and label.
+ * @param {number} offsetDays
+ * @returns {{start: Date, end: Date, dateLabel: string}}
+ */
 function getDayRangeUtc(offsetDays = 0) {
   const now = new Date();
   const todayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0));
@@ -261,6 +328,13 @@ function getDayRangeUtc(offsetDays = 0) {
 // ------------------------------------------------------------------
 // Message scraping (same as before)
 // ------------------------------------------------------------------
+/**
+ * Fetch messages in a time window for a specific channel.
+ * @param {import('discord.js').TextBasedChannel} channel
+ * @param {Date} startDate
+ * @param {Date} endDate
+ * @returns {Promise<Array<import('discord.js').Message>>}
+ */
 async function fetchMessagesInRange(channel, startDate, endDate) {
   if (!channel || !channel.isTextBased()) return [];
   const msgs = [];
@@ -292,6 +366,13 @@ async function fetchMessagesInRange(channel, startDate, endDate) {
   return msgs;
 }
 
+/**
+ * Collect all messages for a range across a set of channels.
+ * @param {Map<string, import('discord.js').GuildBasedChannel>} channels
+ * @param {Date} start
+ * @param {Date} end
+ * @returns {Promise<{allMessages: Array, messagesByUser: Map}>}
+ */
 async function collectMessagesForRange(channels, start, end) {
   const allMessages = [];
   const messagesByUser = new Map();
@@ -312,6 +393,13 @@ async function collectMessagesForRange(channels, start, end) {
   return { allMessages, messagesByUser };
 }
 
+/**
+ * Collect recent messages across channels with global trimming.
+ * @param {Map<string, import('discord.js').GuildBasedChannel>} channels
+ * @param {number} perChannelLimit
+ * @param {number} totalLimit
+ * @returns {Promise<{allMessages: Array, messagesByUser: Map, dateLabel: string|null}>}
+ */
 async function collectRecentMessages(channels, perChannelLimit = 50, totalLimit = 500) {
   const allMessages = [];
 
@@ -341,6 +429,11 @@ async function collectRecentMessages(channels, perChannelLimit = 50, totalLimit 
   return { allMessages: trimmed, messagesByUser, dateLabel };
 }
 
+/**
+ * Sort channels by lastMessageId descending to scan active channels first.
+ * @param {Map<string, import('discord.js').GuildBasedChannel>} channels
+ * @returns {Array<import('discord.js').GuildBasedChannel>}
+ */
 function getChannelScanList(channels) {
   const list = Array.from(channels.values());
   const toSnowflake = id => {
@@ -360,6 +453,13 @@ function getChannelScanList(channels) {
   return list;
 }
 
+/**
+ * Scan channels for recent opted-in messages with paging constraints.
+ * @param {Map<string, import('discord.js').GuildBasedChannel>} channels
+ * @param {Set<string>} optedInSet
+ * @param {object} options
+ * @returns {Promise<{allMessages: Array, messagesByUser: Map, dateLabel: string|null}>}
+ */
 async function collectRecentOptInMessages(channels, optedInSet, options = {}) {
   const {
     perPage = 100,
@@ -414,6 +514,12 @@ async function collectRecentOptInMessages(channels, optedInSet, options = {}) {
   return { allMessages: trimmed, messagesByUser, dateLabel };
 }
 
+/**
+ * Filter messages down to opted-in users only.
+ * @param {Array} allMessages
+ * @param {Set<string>} optedInSet
+ * @returns {{allMessages: Array, messagesByUser: Map}}
+ */
 function filterMessagesByOptIn(allMessages, optedInSet) {
   const filtered = allMessages.filter(m => optedInSet.has(m.author.id));
   const messagesByUser = new Map();
@@ -424,6 +530,12 @@ function filterMessagesByOptIn(allMessages, optedInSet) {
   return { allMessages: filtered, messagesByUser };
 }
 
+/**
+ * Derive a date label from the newest message in a list.
+ * @param {Array} messages
+ * @param {string} fallbackLabel
+ * @returns {string}
+ */
 function getNewestMessageDateLabel(messages, fallbackLabel) {
   if (!messages || messages.length === 0) return fallbackLabel;
   const newest = messages.reduce((a, b) => (a.createdTimestamp > b.createdTimestamp ? a : b));
@@ -433,6 +545,14 @@ function getNewestMessageDateLabel(messages, fallbackLabel) {
 // ------------------------------------------------------------------
 // Puzzle builders
 // ------------------------------------------------------------------
+/**
+ * Build the Friendle daily puzzle payload.
+ * @param {import('discord.js').Guild} guild
+ * @param {Map<string, Array>} messagesByUser
+ * @param {Map<string, import('discord.js').GuildMember>} membersMap
+ * @param {string} dateLabel
+ * @returns {Promise<object|null>}
+ */
 async function buildFriendlePayload(guild, messagesByUser, membersMap, dateLabel) {
   const candidateEntries = Array.from(messagesByUser.entries())
     .filter(([uid, msgs]) => storage.optInUsers.includes(uid) && msgs.length > 0);
@@ -462,6 +582,14 @@ async function buildFriendlePayload(guild, messagesByUser, membersMap, dateLabel
   };
 }
 
+/**
+ * Fallback Friendle payload using precomputed metrics only.
+ * @param {Array<string>} optedInMembers
+ * @param {Map<string, import('discord.js').GuildMember>} membersMap
+ * @param {object} metricsMap
+ * @param {string} dateLabel
+ * @returns {object|null}
+ */
 function buildFallbackFriendleFromMetrics(optedInMembers, membersMap, metricsMap, dateLabel) {
   if (!optedInMembers || optedInMembers.length === 0) return null;
   const userId = optedInMembers[Math.floor(Math.random() * optedInMembers.length)];
@@ -483,11 +611,23 @@ function buildFallbackFriendleFromMetrics(optedInMembers, membersMap, metricsMap
   };
 }
 
+/**
+ * Pick a random message from a list.
+ * @param {Array} messages
+ * @returns {object|null}
+ */
 function pickRandomMessage(messages) {
   if (!messages || messages.length === 0) return null;
   return messages[Math.floor(Math.random() * messages.length)];
 }
 
+/**
+ * Build the Quotele payload from long non-URL messages.
+ * @param {import('discord.js').Guild} guild
+ * @param {Array} allMessages
+ * @param {string} dateLabel
+ * @returns {Promise<object|null>}
+ */
 async function buildQuotelePayload(guild, allMessages, dateLabel) {
   const longMsgs = allMessages
     .filter(m => m.content && m.content.length >= MIN_QUOTE_LENGTH)
@@ -527,6 +667,11 @@ async function buildQuotelePayload(guild, allMessages, dateLabel) {
   };
 }
 
+/**
+ * Normalize quotes for hashing/validation.
+ * @param {string} text
+ * @returns {string}
+ */
 function normalizeQuoteForHash(text) {
   return anonymizeText(text)
     .toLowerCase()
@@ -536,10 +681,22 @@ function normalizeQuoteForHash(text) {
 }
 
 // Node built-in crypto SHA-256 hex
+/**
+ * Hash a string using SHA-256.
+ * @param {string} text
+ * @returns {string}
+ */
 function sha256Hex(text) {
   return crypto.createHash('sha256').update(text).digest('hex');
 }
 
+/**
+ * Build the Mediale payload using image attachments.
+ * @param {import('discord.js').Guild} guild
+ * @param {Array} allMessages
+ * @param {string} dateLabel
+ * @returns {Promise<object|null>}
+ */
 async function buildMedialePayload(guild, allMessages, dateLabel) {
   const mediaMsgs = allMessages
     .filter(m => hasImageAttachment(m));
@@ -567,6 +724,13 @@ async function buildMedialePayload(guild, allMessages, dateLabel) {
   };
 }
 
+/**
+ * Build the Statle payload from message stats and rare words.
+ * @param {import('discord.js').Guild} guild
+ * @param {Array} allMessages
+ * @param {string} dateLabel
+ * @returns {Promise<object|null>}
+ */
 async function buildStatlePayload(guild, allMessages, dateLabel) {
   if (allMessages.length === 0) return null;
   const byUser = new Map();
@@ -629,6 +793,9 @@ async function buildStatlePayload(guild, allMessages, dateLabel) {
 // ------------------------------------------------------------------
 // Main generation flow with metadata posting
 // ------------------------------------------------------------------
+/**
+ * Generate puzzles for all guilds in the client cache.
+ */
 async function generateDailyPuzzles() {
   console.log('Starting daily puzzle generation...');
 
@@ -649,6 +816,11 @@ async function generateDailyPuzzles() {
 // ------------------------------------------------------------------
 // POST puzzles to Worker
 // ------------------------------------------------------------------
+/**
+ * Post an individual puzzle to the Cloudflare Worker.
+ * @param {string} guildId
+ * @param {object} puzzle
+ */
 async function postPuzzleToWebsite(guildId, puzzle) {
   try {
     const payload = { guild_id: guildId, puzzle };
@@ -673,6 +845,11 @@ async function postPuzzleToWebsite(guildId, puzzle) {
   }
 }
 
+/**
+ * Build and post puzzles + metadata for a single guild.
+ * @param {import('discord.js').Guild} guild
+ * @returns {Promise<{puzzles: Array, generated: boolean, reason?: string}>}
+ */
 async function generatePuzzlesForGuild(guild) {
   const guildId = guild.id;
   await guild.members.fetch();
@@ -878,6 +1055,10 @@ async function generatePuzzlesForGuild(guild) {
   return { puzzles, generated: true };
 }
 
+/**
+ * Quick helper for date labels used by /play.
+ * @returns {{yesterday: string, today: string}}
+ */
 function getRecentDateLabelsUtc() {
   const yesterday = getDayRangeUtc(-1).dateLabel;
   const today = getDayRangeUtc(0).dateLabel;
