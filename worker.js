@@ -84,6 +84,7 @@ export default {
           ...stats,
           // Back-compat for your UI code:
           guessed_correctly: stats.guessed_correctly,
+          played_all: stats.completed_games,
         },
         200,
         corsHeaders
@@ -95,7 +96,7 @@ export default {
     // ------------------------------
     // Body:
     // {
-    //   "type": "view" | "guess" | "guess_correct",
+    //   "type": "view" | "guess" | "guess_correct" | "game_complete",
     //   "guild_id": "123" (optional, default "global"),
     //   "date": "YYYY-MM-DD" (optional),
     //   "latest": true (optional; if true and no date, uses guild latest_date)
@@ -123,9 +124,14 @@ export default {
         return json({ error: "Invalid JSON" }, 400, corsHeaders);
       }
 
-      const type = String(payload.type || "").toLowerCase();
-      if (!["view", "guess", "guess_correct"].includes(type)) {
-        return json({ error: "Invalid type. Use view | guess | guess_correct" }, 400, corsHeaders);
+      const rawType = String(payload.type || "").toLowerCase();
+      const type = rawType === "game_completed" ? "game_complete" : rawType;
+      if (!["view", "guess", "guess_correct", "game_complete"].includes(type)) {
+        return json(
+          { error: "Invalid type. Use view | guess | guess_correct | game_complete" },
+          400,
+          corsHeaders
+        );
       }
 
       const guildId = payload.guild_id ? String(payload.guild_id) : "global";
@@ -217,6 +223,13 @@ export default {
           expirationTtl: 60 * 60 * 24 * 365,
         });
       }
+      if (Array.isArray(payload.allowed_usernames)) {
+        await kv.put(
+          `guild:${guildId}:date:${date}:allowed_usernames`,
+          JSON.stringify(payload.allowed_usernames.filter(Boolean)),
+          { expirationTtl: 60 * 60 * 24 * 365 }
+        );
+      }
 
       return json({ ok: true }, 200, corsHeaders);
     }
@@ -242,9 +255,10 @@ export default {
 
       const namesJson = await kv.get(`guild:${guildId}:date:${date}:names`);
       const metricsJson = await kv.get(`guild:${guildId}:date:${date}:metrics`);
+      const allowedJson = await kv.get(`guild:${guildId}:date:${date}:allowed_usernames`);
       const names = namesJson ? JSON.parse(namesJson) : {};
       const metrics = metricsJson ? JSON.parse(metricsJson) : {};
-      const allowedUsernames = Object.values(names).map((n) => String(n).toLowerCase());
+      const allowedUsernames = allowedJson ? JSON.parse(allowedJson) : [];
 
       if (game) {
         const key = `guild:${guildId}:date:${date}:game:${game}`;
@@ -255,7 +269,14 @@ export default {
         attachSolutionInfo(puzzle, names, metrics);
 
         return json(
-          { guild_id: guildId, date, puzzles: { [game]: puzzle }, names, metrics, allowed_usernames: allowedUsernames },
+          {
+            guild_id: guildId,
+            date,
+            puzzles: { [game]: puzzle },
+            names,
+            metrics,
+            allowed_usernames: allowedUsernames,
+          },
           200,
           corsHeaders
         );
@@ -345,17 +366,19 @@ function timingSafeEqualHex(a, b) {
 
 // ------------ NEW helpers for stats ------------
 async function readStats(kv, scopeKey) {
-  const [views, guesses, correct, active] = await Promise.all([
+  const [views, guesses, correct, active, completed] = await Promise.all([
     kv.get(`${scopeKey}:views`),
     kv.get(`${scopeKey}:guesses_total`),
     kv.get(`${scopeKey}:guessed_correctly`),
     kv.get(`${scopeKey}:active_players`),
+    kv.get(`${scopeKey}:completed_games`),
   ]);
   return {
     views: Number(views || 0),
     guesses_total: Number(guesses || 0),
     guessed_correctly: Number(correct || 0),
     active_players: Number(active || 0),
+    completed_games: Number(completed || 0),
   };
 }
 
@@ -366,6 +389,7 @@ async function bumpStat(kv, scopeKey, type) {
     if (t === "view") return `${scopeKey}:views`;
     if (t === "guess") return `${scopeKey}:guesses_total`;
     if (t === "guess_correct") return `${scopeKey}:guessed_correctly`;
+    if (t === "game_complete") return `${scopeKey}:completed_games`;
     return null;
   };
 
