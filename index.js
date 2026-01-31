@@ -283,7 +283,7 @@ function getMediaFromMessage(message) {
   const attachment = message.attachments?.first();
   if (attachment) {
     const ext = attachment.name ? attachment.name.split('.').pop().toLowerCase() : '';
-    if (['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(ext)) {
+    if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'mp4', 'webm'].includes(ext)) {
       return {
         url: attachment.url,
         sourceUrl: attachment.url,
@@ -291,7 +291,7 @@ function getMediaFromMessage(message) {
         size: attachment.size || null
       };
     }
-    if (attachment.contentType && attachment.contentType.startsWith('image')) {
+    if (attachment.contentType && (attachment.contentType.startsWith('image') || attachment.contentType.startsWith('video'))) {
       return {
         url: attachment.url,
         sourceUrl: attachment.url,
@@ -304,6 +304,10 @@ function getMediaFromMessage(message) {
   if (message.embeds && message.embeds.length) {
     for (const embed of message.embeds) {
       const embedUrl = embed?.url || null;
+      const videoUrl = embed?.video?.url || null;
+      if (videoUrl && isMediaUrl(videoUrl)) {
+        return { url: videoUrl, sourceUrl: embedUrl || videoUrl, fileName: null, size: null };
+      }
       const imageUrl = embed?.image?.url || embed?.thumbnail?.url;
       if (imageUrl) {
         return { url: imageUrl, sourceUrl: embedUrl || imageUrl, fileName: null, size: null };
@@ -339,6 +343,12 @@ function extractImageUrlFromText(text) {
     if (/\.(png|jpe?g|gif|webp)$/i.test(base)) return cleaned;
   }
   return null;
+}
+
+function isMediaUrl(url) {
+  if (!url) return false;
+  const base = String(url).split('?')[0];
+  return /\.(png|jpe?g|gif|webp|mp4|webm)$/i.test(base);
 }
 
 /**
