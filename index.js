@@ -201,6 +201,27 @@ function hasImageAttachment(message) {
   return Boolean(attachment.contentType && attachment.contentType.startsWith('image'));
 }
 
+async function getReadableTextChannels(guild) {
+  const channels = new Map();
+  for (const [id, channel] of guild.channels.cache) {
+    if (!channel.isTextBased() || !channel.viewable || channel.nsfw) continue;
+    channels.set(id, channel);
+  }
+  try {
+    const activeThreads = await guild.channels.fetchActiveThreads();
+    const threadCollection = activeThreads?.threads || activeThreads;
+    if (threadCollection && typeof threadCollection.values === 'function') {
+      for (const thread of threadCollection.values()) {
+        if (!thread || !thread.isTextBased() || !thread.viewable || thread.nsfw) continue;
+        channels.set(thread.id, thread);
+      }
+    }
+  } catch (err) {
+    console.warn('Could not fetch active threads for guild', guild.id, err.message);
+  }
+  return channels;
+}
+
 function buildPlayUrl(guildId) {
   if (!FRONTEND_URL) return null;
   try {
@@ -418,11 +439,32 @@ async function buildFriendlePayload(guild, messagesByUser, membersMap, dateLabel
     solution_user_id: userId,
     clues: {
       messages_yesterday: `${Math.max(1, messageCount)} messages`,
-      top_word: topWord,
-      active_window: activeWindow,
-      mentions: mentions,
-      first_message_bucket: bucketTime(new Date(firstMsg.createdTimestamp)),
-      account_age_range: member ? accountAgeRange(new Date(member.user.createdTimestamp)) : null
+      top_word: topWord || 'None',
+      active_window: activeWindow || 'Not active',
+      mentions: mentions ?? 0,
+      first_message_bucket: bucketTime(new Date(firstMsg.createdTimestamp)) || 'Not active',
+      account_age_range: member ? accountAgeRange(new Date(member.user.createdTimestamp)) : 'Unknown'
+    }
+  };
+}
+
+function buildFallbackFriendleFromMetrics(optedInMembers, membersMap, metricsMap, dateLabel) {
+  if (!optedInMembers || optedInMembers.length === 0) return null;
+  const userId = optedInMembers[Math.floor(Math.random() * optedInMembers.length)];
+  const metrics = metricsMap?.[userId] || {};
+  const member = membersMap.get(userId);
+  const messageCount = Number(metrics.messageCount ?? 0);
+  return {
+    game: 'friendle_daily',
+    date: dateLabel,
+    solution_user_id: userId,
+    clues: {
+      messages_yesterday: `${Math.max(0, messageCount)} messages`,
+      top_word: metrics.topWord || 'None',
+      active_window: metrics.activeWindow || 'Not active',
+      mentions: metrics.mentions ?? 0,
+      first_message_bucket: metrics.firstMessageBucket || 'Not active',
+      account_age_range: metrics.accountAgeRange || (member ? accountAgeRange(new Date(member.user.createdTimestamp)) : 'Unknown')
     }
   };
 }
@@ -629,9 +671,7 @@ async function generatePuzzlesForGuild(guild) {
   }
   const optedInSet = new Set(optedInMembers);
 
-  const channels = guild.channels.cache.filter(
-    c => c.isTextBased() && c.viewable && !c.nsfw
-  );
+  const channels = await getReadableTextChannels(guild);
 
   const yesterdayRange = getDayRangeUtc(-1);
   const todayRange = getDayRangeUtc(0);
@@ -667,9 +707,31 @@ async function generatePuzzlesForGuild(guild) {
     dateLabel = getNewestMessageDateLabel(allMessages, fallback.dateLabel || dateLabel);
   }
 
-  if (allMessages.length === 0) {
+  const hasOptedInMessages = allMessages.length > 0;
+  if (!hasOptedInMessages) {
     console.log('No recent opted-in messages available for guild', guildId);
-    return { puzzles: [], generated: false, reason: 'no_opted_in_messages' };
+    dateLabel = getDayRangeUtc(0).dateLabel;
+  }
+
+  // Build puzzles
+  let friendle = await buildFriendlePayload(guild, messagesByUser, membersMap, dateLabel);
+  let metricsMessagesByUser = messagesByUser;
+  let metadataDateLabel = dateLabel;
+
+  if (!friendle) {
+    const friendFallback = await collectRecentOptInMessages(channels, optedInSet, {
+      perPage: 100,
+      maxPages: 50,
+      totalLimit: 800,
+      minMessageCount: 15,
+      maxTotalFetches: 350
+    });
+    const friendDate = getNewestMessageDateLabel(friendFallback.allMessages, friendFallback.dateLabel || dateLabel);
+    friendle = await buildFriendlePayload(guild, friendFallback.messagesByUser, membersMap, friendDate);
+    if (friendle) {
+      metricsMessagesByUser = friendFallback.messagesByUser;
+      metadataDateLabel = friendDate;
+    }
   }
 
   // Compute nameMap and metricsMap for this guild/date
@@ -677,7 +739,7 @@ async function generatePuzzlesForGuild(guild) {
   const metricsMap = {};
   for (const [uid, member] of membersMap) {
     nameMap[uid] = getDisplayName(member);
-    const msgs = messagesByUser.get(uid) || [];
+    const msgs = metricsMessagesByUser.get(uid) || [];
     const messageCount = msgs.length;
     let activeWindow, mentions, firstMessageBucket;
     if (messageCount > 0) {
@@ -706,8 +768,10 @@ async function generatePuzzlesForGuild(guild) {
     };
   }
 
-  // Build puzzles
-  const friendle = await buildFriendlePayload(guild, messagesByUser, membersMap, dateLabel);
+  if (!friendle) {
+    friendle = buildFallbackFriendleFromMetrics(optedInMembers, membersMap, metricsMap, dateLabel);
+  }
+
   let quotele = await buildQuotelePayload(guild, allMessages, dateLabel);
   let mediale = await buildMedialePayload(guild, allMessages, dateLabel);
   let statle = await buildStatlePayload(guild, allMessages, dateLabel);
@@ -770,7 +834,7 @@ async function generatePuzzlesForGuild(guild) {
   // Post metadata (names and metrics) once per guild/day
   const metadataPayload = {
     guild_id: guildId,
-    date: dateLabel,
+    date: metadataDateLabel,
     names: nameMap,
     metrics: metricsMap
   };
@@ -786,7 +850,11 @@ async function generatePuzzlesForGuild(guild) {
     validateStatus: () => true
   });
 
-  storage.lastRunByGuild[guildId] = dateLabel;
+  if (friendle) {
+    storage.lastRunByGuild[guildId] = metadataDateLabel;
+  } else if (storage.lastRunByGuild && storage.lastRunByGuild[guildId]) {
+    delete storage.lastRunByGuild[guildId];
+  }
   saveStorage();
 
   console.log(`Puzzles for ${guildId}:`, puzzles.map(p => p.game));
