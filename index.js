@@ -254,17 +254,81 @@ function getDisplayName(member) {
 }
 
 /**
- * Check whether a message contains an image attachment.
+ * Extract the first media payload (attachment, embed, sticker, or direct link).
+ * @param {import('discord.js').Message} message
+ * @returns {{url: string, sourceUrl?: string|null, fileName?: string|null, size?: number|null}|null}
+ */
+function getMediaFromMessage(message) {
+  if (!message) return null;
+
+  const attachment = message.attachments?.first();
+  if (attachment) {
+    const ext = attachment.name ? attachment.name.split('.').pop().toLowerCase() : '';
+    if (['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(ext)) {
+      return {
+        url: attachment.url,
+        sourceUrl: attachment.url,
+        fileName: attachment.name || null,
+        size: attachment.size || null
+      };
+    }
+    if (attachment.contentType && attachment.contentType.startsWith('image')) {
+      return {
+        url: attachment.url,
+        sourceUrl: attachment.url,
+        fileName: attachment.name || null,
+        size: attachment.size || null
+      };
+    }
+  }
+
+  if (message.embeds && message.embeds.length) {
+    for (const embed of message.embeds) {
+      const embedUrl = embed?.url || null;
+      const imageUrl = embed?.image?.url || embed?.thumbnail?.url;
+      if (imageUrl) {
+        return { url: imageUrl, sourceUrl: embedUrl || imageUrl, fileName: null, size: null };
+      }
+    }
+  }
+
+  const sticker = message.stickers?.first?.();
+  if (sticker && sticker.url) {
+    return {
+      url: sticker.url,
+      sourceUrl: sticker.url,
+      fileName: sticker.name || null,
+      size: null
+    };
+  }
+
+  const inlineUrl = extractImageUrlFromText(message.content);
+  if (inlineUrl) {
+    return { url: inlineUrl, sourceUrl: inlineUrl, fileName: null, size: null };
+  }
+
+  return null;
+}
+
+function extractImageUrlFromText(text) {
+  if (!text) return null;
+  const matches = text.match(/https?:\/\/\S+/gi);
+  if (!matches) return null;
+  for (const raw of matches) {
+    const cleaned = raw.replace(/[),.!?]+$/g, '');
+    const base = cleaned.split('?')[0];
+    if (/\.(png|jpe?g|gif|webp)$/i.test(base)) return cleaned;
+  }
+  return null;
+}
+
+/**
+ * Check whether a message contains an image attachment or media embed.
  * @param {import('discord.js').Message} message
  * @returns {boolean}
  */
 function hasImageAttachment(message) {
-  if (!message || !message.attachments || message.attachments.size === 0) return false;
-  const attachment = message.attachments.first();
-  if (!attachment) return false;
-  const ext = attachment.name ? attachment.name.split('.').pop().toLowerCase() : '';
-  if (['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(ext)) return true;
-  return Boolean(attachment.contentType && attachment.contentType.startsWith('image'));
+  return Boolean(getMediaFromMessage(message));
 }
 
 /**
@@ -702,17 +766,20 @@ async function buildMedialePayload(guild, allMessages, dateLabel) {
     .filter(m => hasImageAttachment(m));
   if (mediaMsgs.length === 0) return null;
   const msg = pickRandomMessage(mediaMsgs);
-  const attachment = msg.attachments.first();
+  const media = getMediaFromMessage(msg);
+  if (!media) return null;
+  const keywordSource = media.fileName || '';
   return {
     game: 'mediale',
     date: dateLabel,
     solution_user_id: msg.author.id,
     media: {
-      url: attachment.url,
-      file_name: attachment.name || null,
-      size: attachment.size || null,
+      url: media.url,
+      file_name: media.fileName || null,
+      size: media.size || null,
+      source_url: media.sourceUrl || media.url,
       // you can add keywords now if you wish:
-      keywords: (attachment.name || '')
+      keywords: keywordSource
         .split(/[._-]/)
         .filter(part => part && /^[a-zA-Z]{2,}/.test(part))
         .map(part => part.toLowerCase())
