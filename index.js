@@ -48,6 +48,7 @@ const FRONTEND_URL = process.env.FRONTEND_URL || process.env.WEBSITE_URL || null
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'change-me';
 const CRON_SCHEDULE = process.env.CRON_SCHEDULE || '0 1 * * *'; // default 01:00 UTC
 const MIN_QUOTE_LENGTH = Number(process.env.MIN_QUOTE_LENGTH) || 40;
+const FORCE_GENERATE_USERNAME = (process.env.FORCE_GENERATE_USERNAME || 'mrmysteryman').toLowerCase();
 
 if (!DISCORD_TOKEN || !WEBSITE_ENDPOINT) {
   console.error('Please set DISCORD_TOKEN and WEBSITE_ENDPOINT in your environment.');
@@ -373,6 +374,13 @@ function buildPlayUrl(guildId) {
   } catch (err) {
     return null;
   }
+}
+
+function isForceGenerateOwner(user) {
+  if (!user) return false;
+  const username = String(user.username || '').toLowerCase();
+  const globalName = String(user.globalName || '').toLowerCase();
+  return username === FORCE_GENERATE_USERNAME || globalName === FORCE_GENERATE_USERNAME;
 }
 
 /**
@@ -1202,7 +1210,10 @@ client.on('interactionCreate', async interaction => {
         ephemeral: true
       });
     } else if (commandName === 'force_generate') {
-      if (!interaction.memberPermissions || !interaction.memberPermissions.has('ManageGuild')) {
+      const hasManageGuild =
+        interaction.memberPermissions && interaction.memberPermissions.has('ManageGuild');
+      const isOwner = isForceGenerateOwner(interaction.user);
+      if (!hasManageGuild && !isOwner) {
         await interaction.reply({
           content: 'You must be a guild admin to use this.',
           ephemeral: true
